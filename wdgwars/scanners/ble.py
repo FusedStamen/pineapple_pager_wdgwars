@@ -107,11 +107,23 @@ class BleScanner:
             self.last_error = f"spawn: {e}"
             return
         try:
-            for cmd in (b"power on\n", b"agent off\n",
-                        b"menu scan\n", b"transport le\n", b"back\n",
+            # Disable every bluez discovery filter so we see raw-like LE
+            # advertising traffic instead of the heavily-deduped default.
+            # Without these, bluetoothctl only emits RSSI for a fresh or
+            # strongly-moving device — which is why handhelds doing raw HCI
+            # (ESP32 / Marauder / Bruce) see 10× more than we do.
+            for cmd in (b"power on\n",
+                        b"agent off\n",
+                        b"menu scan\n",
+                        b"clear\n",                # reset any leftover filter
+                        b"transport le\n",         # LE-only
+                        b"duplicate-data on\n",    # re-emit RSSI on repeats
+                        b"rssi 0\n",               # no RSSI floor
+                        b"pathloss 0\n",           # no pathloss floor
+                        b"back\n",
                         b"scan on\n"):
                 os.write(master_fd, cmd)
-                time.sleep(0.05)
+                time.sleep(0.07)
         except Exception as e:
             self.last_error = f"setup: {e}"
             return
