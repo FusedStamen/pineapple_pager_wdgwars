@@ -180,11 +180,26 @@ class GpsReader:
             self._thr.join(timeout=2)
             self._thr = None
 
+    def _candidate_devices(self) -> list[str]:
+        """Config list first (so user preference wins), then anything else
+        matching /dev/ttyACM* or /dev/ttyUSB* — u-blox sometimes re-enumerates
+        to a higher index after a replug, so we must discover dynamically."""
+        import glob as _glob
+        seen = set()
+        out: list[str] = []
+        for d in list(self.devices) + sorted(
+                _glob.glob("/dev/ttyACM*") + _glob.glob("/dev/ttyUSB*")):
+            if d not in seen and os.path.exists(d):
+                seen.add(d)
+                out.append(d)
+        return out
+
     def _open(self) -> tuple[int, str] | None:
-        """Try each candidate device; pick the first one emitting NMEA within ~3s."""
-        for dev in self.devices:
-            if not os.path.exists(dev):
-                continue
+        """Try each candidate device; pick the first one emitting a valid
+        NMEA GGA or RMC sentence. The older "starts with $G" check passed on
+        u-blox's secondary control channel (which advertises $GNxxx stubs
+        without useful fix data), so we now validate through parse_nmea."""
+        for dev in self._candidate_devices():
             try:
                 fd = os.open(dev, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
             except OSError:
@@ -199,8 +214,10 @@ class GpsReader:
             os.close(fd)
         return None
 
-    def _validate_nmea(self, fd: int, timeout_s: float = 3.0) -> bool:
-        """Return True if the device emits at least one $G... line within timeout."""
+    def _validate_nmea(self, fd: int, timeout_s: float = 3.5) -> bool:
+        """Accept the device only if it emits at least one parseable GGA/RMC
+        within the window — a valid checksum and one of the fix-bearing
+        sentences we actually care about."""
         deadline = time.time() + timeout_s
         buf = b""
         while time.time() < deadline and not self._stop.is_set():
@@ -215,8 +232,11 @@ class GpsReader:
                 time.sleep(0.05)
                 continue
             buf += chunk
-            for line in buf.split(b"\n"):
-                if line.startswith(b"$G") and b"*" in line:
+            while b"\n" in buf:
+                line, _, buf = buf.partition(b"\n")
+                text = line.decode("ascii", errors="ignore").strip("\r\x00 ")
+                parsed = parse_nmea(text)
+                if parsed and parsed.get("sentence") in ("GGA", "RMC"):
                     return True
             buf = buf[-256:]
         return False

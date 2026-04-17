@@ -1,7 +1,7 @@
 {
   "api_key": "",
   "gps": {
-    "devices": ["/dev/ttyACM2", "/dev/ttyACM1", "/dev/ttyACM0", "/dev/ttyUSB0"],
+    "devices": ["/dev/ttyACM3", "/dev/ttyACM2", "/dev/ttyACM1", "/dev/ttyACM0", "/dev/ttyUSB0"],
     "baud": 9600,
     "min_sats": 4,
     "fix_timeout_s": 90
