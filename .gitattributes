@@ -1,0 +1,17 @@
+# Force Unix LF line endings on text files so pager shell scripts survive
+# a Windows clone + upload round-trip (BusyBox ash chokes on "set -e\r").
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.py   text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.so   binary
+*.ttf  binary
+*.heic binary
+*.mp4  binary

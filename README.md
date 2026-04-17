@@ -59,6 +59,11 @@ wdgwars/
    payload (no internet needed) and installs `iw`, `bluez-utils`,
    `kmod-usb-acm` via `opkg` if they're missing.
 
+   > **Windows users:** if bootstrap fails with `Illegal option -` or
+   > `: not foundh`, the shell scripts picked up `\r\n` line endings in
+   > transit. Run `sed -i 's/\r$//' wdgwars/*.sh` on the pager once and
+   > re-run — `bootstrap.sh` also self-heals on first re-invocation.
+
 3. Push handoff launchers to peer payloads so `JUMP TO` is bidirectional:
 
    ```sh
