@@ -432,10 +432,18 @@ class App:
             br = mgr.brightness if mgr else self.cfg.get("ui", {}).get("brightness", 70)
             it_s = int(mgr.timeout) if mgr else self.cfg.get("ui", {}).get("idle_timeout_s", 20)
             dim = mgr.dim_level if mgr else self.cfg.get("ui", {}).get("auto_dim_level", 10)
+            gps_cfg = self.cfg.get("gps", {})
+            gps_devs = gps_cfg.get("devices", [])
+            gps_current = gps_devs[0] if gps_devs else "AUTO"
+            gps_baud = gps_cfg.get("baud", 9600)
             return [
                 menu.MenuItem(f"API KEY  [{masked}]", action=lambda: self._cfg_view_key()),
                 menu.MenuItem("EDIT API KEY", action=lambda: self._cfg_edit_key()),
                 menu.MenuItem("TEST CONNECTION", action=lambda: self._cfg_test()),
+                menu.MenuItem("GPS DEVICE", action=lambda: self._cfg_gps_device(),
+                              badge=gps_current.replace("/dev/", "")),
+                menu.MenuItem("GPS BAUD", action=lambda: self._cfg_gps_baud(),
+                              badge=str(gps_baud)),
                 menu.MenuItem("BRIGHTNESS +", action=lambda: self._cfg_brightness(+10),
                               badge=f"{br}%"),
                 menu.MenuItem("BRIGHTNESS -", action=lambda: self._cfg_brightness(-10),
@@ -450,9 +458,66 @@ class App:
                               badge=f"{dim}%"),
                 menu.MenuItem("BACK", action=lambda: "back"),
             ]
-        # menu.run loops internally; only returns on BACK/B-press or when an
-        # action returns a non-None result (the BACK item returns "back").
         menu.run(self.p, self.pal, "CONFIG", build_items)
+
+    def _cfg_gps_device(self):
+        """Pick a specific /dev/ttyACM* or /dev/ttyUSB* (or AUTO). Saves
+        choice to config and hot-restarts the GPS reader so the new device
+        takes effect without restarting the payload."""
+        import glob as _glob
+        present = sorted(_glob.glob("/dev/ttyACM*") + _glob.glob("/dev/ttyUSB*"))
+        if not present:
+            dialog.alert(self.p, self.pal, "GPS",
+                         "No ttyACM / ttyUSB\ndevices present.\nPlug in GPS first.",
+                         accent=self.pal.amber)
+            return
+        items = [menu.MenuItem("AUTO", action=lambda: self._set_gps_device(None))]
+        for d in present:
+            items.append(menu.MenuItem(d, action=lambda dev=d: self._set_gps_device(dev)))
+        items.append(menu.MenuItem("BACK", action=lambda: "back"))
+        menu.run(self.p, self.pal, "GPS DEVICE", items)
+
+    def _set_gps_device(self, dev):
+        gps_cfg = self.cfg.setdefault("gps", {})
+        if dev is None:
+            gps_cfg["devices"] = []
+            label = "AUTO"
+        else:
+            # Keep the chosen device first; retain others as fallback order.
+            others = [d for d in gps_cfg.get("devices", []) if d != dev]
+            gps_cfg["devices"] = [dev] + others
+            label = dev
+        save_config(self.cfg)
+        self._restart_gps()
+        dialog.alert(self.p, self.pal, "GPS DEVICE",
+                     f"Set to:\n{label}\n\nRe-locking...",
+                     accent=self.pal.cyan)
+        return "back"
+
+    def _cfg_gps_baud(self):
+        choices = [4800, 9600, 19200, 38400, 57600, 115200]
+        cur = self.cfg.get("gps", {}).get("baud", 9600)
+        try:
+            idx = choices.index(cur)
+        except ValueError:
+            idx = 1
+        new = choices[(idx + 1) % len(choices)]
+        self.cfg.setdefault("gps", {})["baud"] = new
+        save_config(self.cfg)
+        self._restart_gps()
+
+    def _restart_gps(self):
+        try:
+            self.gps.stop()
+        except Exception:
+            pass
+        gps_cfg = self.cfg.get("gps", {})
+        self.gps = GpsReader(
+            gps_cfg.get("devices", []) or [],
+            baud=gps_cfg.get("baud", 9600),
+            min_sats=gps_cfg.get("min_sats", 4),
+        )
+        self.gps.start()
 
     def _cfg_view_key(self):
         cur = self.cfg.get("api_key", "")
