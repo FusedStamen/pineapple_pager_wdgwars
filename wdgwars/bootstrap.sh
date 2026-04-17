@@ -46,4 +46,21 @@ mkdir -p /mmc/root/loot/wdgwars/sessions
 chmod +x "$PAYLOAD_DIR/payload.sh" 2>/dev/null
 chmod +x "$PAYLOAD_DIR"/launch_*.sh 2>/dev/null
 
+# Push the reverse launcher (launch_wdgwars.sh) into every installed peer
+# payload so they can JUMP TO WDGoWars. Skips peers that aren't installed.
+echo "[bootstrap] installing reverse JUMP TO launcher in peers"
+RL="$PAYLOAD_DIR/launchers/launch_wdgwars.sh"
+if [ -f "$RL" ]; then
+    PEERS="/root/payloads/user/reconnaissance"
+    for peer in loki pagergotchi wifman pager_bjorn; do
+        if [ -d "$PEERS/$peer" ]; then
+            cp "$RL" "$PEERS/$peer/launch_wdgwars.sh" \
+                && chmod +x "$PEERS/$peer/launch_wdgwars.sh" \
+                && echo "  -> $peer"
+        fi
+    done
+else
+    echo "  warn: $RL missing, skipping (outgoing JUMP TO still works)"
+fi
+
 echo "[bootstrap] done"

@@ -41,13 +41,17 @@ wdgwars/
 
 ## Install on the pager
 
-1. Copy the `wdgwars/` folder into the standard payloads tree on the pager:
+**From your laptop** (not from an SSH session on the pager):
+
+1. Clone + copy the `wdgwars/` folder into the payloads tree:
 
    ```sh
+   git clone https://github.com/LOCOSP/pineapple_pager_wdgwars
+   cd pineapple_pager_wdgwars
    scp -r wdgwars root@172.16.52.1:/mmc/root/payloads/user/reconnaissance/wdgwars
    ```
 
-2. Run the bootstrap **once** from the pager:
+2. SSH in and run the bootstrap **once**:
 
    ```sh
    ssh root@172.16.52.1
@@ -55,42 +59,38 @@ wdgwars/
    sh bootstrap.sh
    ```
 
-   That copies `pagerctl.py` + `libpagerctl.so` from the bundled `wifman`
-   payload (no internet needed) and installs `iw`, `bluez-utils`,
-   `kmod-usb-acm` via `opkg` if they're missing.
+   `bootstrap.sh` does everything in one shot: copies `pagerctl.py` +
+   `libpagerctl.so` from the bundled `wifman` payload, installs `iw` /
+   `bluez-utils` / `kmod-usb-acm` via `opkg` (best-effort), creates the
+   loot dir, **and pushes the reverse JUMP TO launcher
+   (`launch_wdgwars.sh`) into every peer payload it finds installed**
+   (Loki / PagerGotchi / WiFMan / Bjorn). No manual scp loop needed.
 
    > **Windows / CRLF note.** If bootstrap (or `payload.sh`) fails with
    > `set: Illegal option -` or `: not foundh`, the shell scripts picked
-   > up `\r\n` line endings somewhere in transit (the usual cause is
-   > unpacking the zip on Windows and copying over SMB). The repo's
-   > `.gitattributes` forces LF on text files so a fresh `git clone` is
-   > immune — but if you already hit it, on the pager run once:
+   > up `\r\n` line endings somewhere in transit (usual cause: unpacking
+   > the zip on Windows, or an SCP client running ASCII-mode translation).
+   > The repo's `.gitattributes` forces LF on text files so a fresh
+   > `git clone` is immune — but if you already hit it, on the pager run
+   > once:
    >
    > ```sh
    > sed -i 's/\r$//' /mmc/root/payloads/user/reconnaissance/wdgwars/*.sh
    > ```
    >
-   > …and re-run the bootstrap. Source-of-truth is always
-   > `git clone https://github.com/LOCOSP/pineapple_pager_wdgwars`.
+   > …and re-run the bootstrap. Pager firmware 1.0.8+ ships `dos2unix`,
+   > which works equally well: `dos2unix wdgwars/*.sh`.
 
-3. Push handoff launchers to peer payloads so `JUMP TO` is bidirectional:
-
-   ```sh
-   for d in loki pagergotchi wifman pager_bjorn; do
-     scp launchers/launch_wdgwars.sh \
-         root@172.16.52.1:/mmc/root/payloads/user/reconnaissance/$d/
-   done
-   ```
-
-4. Grab an API key at <https://wdgwars.pl/profile> → "Generate API key", then
+3. Grab an API key at <https://wdgwars.pl/profile> → "Generate API key", then
    either edit `config.json` on the pager (`api_key` field) or use
    **CONFIG → EDIT API KEY** on the device (hex on-screen keyboard).
 
-5. Plug in the u-blox 7 GPS stick. The pager auto-detects
-   `/dev/ttyACM2`, `/dev/ttyACM1`, `/dev/ttyACM0`, `/dev/ttyUSB0` and locks
-   onto the first one emitting valid NMEA.
+4. Plug in the u-blox 7 GPS stick. The pager auto-detects
+   `/dev/ttyACM*` / `/dev/ttyUSB*` and locks onto the first one emitting
+   valid NMEA. If it lands on the wrong one, override via
+   **CONFIG → GPS DEVICE**.
 
-6. From the pager dashboard pick **Payloads → User → Reconnaissance → WDGoWars Wardriver**.
+5. From the pager dashboard pick **Payloads → User → Reconnaissance → WDGoWars Wardriver**.
 
 ## UI map
 
