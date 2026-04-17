@@ -59,10 +59,19 @@ wdgwars/
    payload (no internet needed) and installs `iw`, `bluez-utils`,
    `kmod-usb-acm` via `opkg` if they're missing.
 
-   > **Windows users:** if bootstrap fails with `Illegal option -` or
-   > `: not foundh`, the shell scripts picked up `\r\n` line endings in
-   > transit. Run `sed -i 's/\r$//' wdgwars/*.sh` on the pager once and
-   > re-run — `bootstrap.sh` also self-heals on first re-invocation.
+   > **Windows / CRLF note.** If bootstrap (or `payload.sh`) fails with
+   > `set: Illegal option -` or `: not foundh`, the shell scripts picked
+   > up `\r\n` line endings somewhere in transit (the usual cause is
+   > unpacking the zip on Windows and copying over SMB). The repo's
+   > `.gitattributes` forces LF on text files so a fresh `git clone` is
+   > immune — but if you already hit it, on the pager run once:
+   >
+   > ```sh
+   > sed -i 's/\r$//' /mmc/root/payloads/user/reconnaissance/wdgwars/*.sh
+   > ```
+   >
+   > …and re-run the bootstrap. Source-of-truth is always
+   > `git clone https://github.com/LOCOSP/pineapple_pager_wdgwars`.
 
 3. Push handoff launchers to peer payloads so `JUMP TO` is bidirectional:
 

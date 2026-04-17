@@ -1,11 +1,12 @@
 #!/bin/sh
-# CRLF self-heal (MUST stay on ONE line — if the file was uploaded from
-# Windows, every line has \r at EOL; a single-line test works because the
-# trailing \r is parsed as whitespace at the end of the whole command).
-tr -d '\r' <"$0" >/tmp/_wdgwars_bs.sh 2>/dev/null; [ -s /tmp/_wdgwars_bs.sh ] && ! cmp -s /tmp/_wdgwars_bs.sh "$0" && { chmod +x /tmp/_wdgwars_bs.sh; exec sh /tmp/_wdgwars_bs.sh "$@"; }
-
 # Run once on the pager to fetch pagerctl bindings from the wifman payload
 # and ensure runtime dependencies are installed.
+#
+# If this script fails with "Illegal option -" or ": not foundh", the
+# file has CRLF line endings (usual cause: cloned/unpacked on Windows).
+# Fix with:  sed -i 's/\r$//' bootstrap.sh payload.sh launch_*.sh
+# The repo's .gitattributes forces LF on text files so a fresh `git clone`
+# should be immune.
 
 PAYLOAD_DIR="$(cd "$(dirname "$0")" && pwd)"
 LIB="$PAYLOAD_DIR/lib"
