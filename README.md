@@ -5,9 +5,12 @@ that turns it into an offline-first **WiFi + BLE wardriver** feeding the
 [wdgwars.pl](https://wdgwars.pl) ARG / wardriving game.
 
 <p align="center">
-  <img src="docs/screenshots/main-menu.jpg" alt="Main menu" width="32%">
-  <img src="docs/screenshots/config.jpg" alt="Config screen" width="32%">
-  <img src="docs/screenshots/test-connection.jpg" alt="TEST CONNECTION response from /api/me" width="32%">
+  <img src="docs/screenshots/main-menu.jpg" alt="Main menu" width="48%">
+  <img src="docs/screenshots/live-hud.jpg" alt="Live scan HUD" width="48%">
+</p>
+<p align="center">
+  <img src="docs/screenshots/config.jpg" alt="Config screen" width="48%">
+  <img src="docs/screenshots/test-connection.jpg" alt="TEST CONNECTION response" width="48%">
 </p>
 
 - WiFi capture via `iw dev wlan0 scan`
