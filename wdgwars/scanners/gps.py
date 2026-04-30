@@ -1,24 +1,24 @@
-"""GPS reader for u-blox 7 USB stick (CDC-ACM, NMEA at 9600 8N1).
+"""GPS reader via gpsd socket — drop-in replacement for the raw-serial version.
 
-Runs a background thread that opens the first available `/dev/ttyACM*` device
-and parses NMEA `$GPGGA` and `$GPRMC` sentences into a shared GpsState.
+Connects to the local gpsd daemon (localhost:2947) and subscribes to the JSON
+watch stream.  The public API (GpsReader, GpsState, GpsSnapshot) is identical
+to the original so no other files need to change.
+
+gpsd handles device detection and initialisation for both the u-blox UG-353
+and the Quectel LC86 (Glyph mod) — whichever is plugged in will be used
+automatically without any config change.
 """
 
 from __future__ import annotations
 
-import os
-import struct
+import json
+import socket
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Iterable
 
-try:
-    import termios
-    HAS_TERMIOS = True
-except ImportError:
-    HAS_TERMIOS = False
-
+# ── public data classes ────────────────────────────────────────────────────
 
 @dataclass
 class GpsState:
@@ -33,15 +33,21 @@ class GpsState:
     last_update: float = 0.0
     device: str = ""
 
-    lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+    lock: threading.Lock = field(default_factory=threading.Lock,
+                                  repr=False, compare=False)
 
     def snapshot(self) -> "GpsSnapshot":
         with self.lock:
             return GpsSnapshot(
-                fix_3d=self.fix_3d, fix_quality=self.fix_quality,
-                lat=self.lat, lon=self.lon, alt_m=self.alt_m,
-                accuracy_m=self.accuracy_m, sats=self.sats,
-                utc_iso=self.utc_iso, last_update=self.last_update,
+                fix_3d=self.fix_3d,
+                fix_quality=self.fix_quality,
+                lat=self.lat,
+                lon=self.lon,
+                alt_m=self.alt_m,
+                accuracy_m=self.accuracy_m,
+                sats=self.sats,
+                utc_iso=self.utc_iso,
+                last_update=self.last_update,
                 device=self.device,
             )
 
@@ -60,114 +66,33 @@ class GpsSnapshot:
     device: str
 
 
-def parse_nmea(line: str) -> dict | None:
-    """Parse a single NMEA line. Returns dict with normalised fields or None."""
-    line = line.strip()
-    if not line.startswith("$") or "*" not in line:
-        return None
-    body, _, csum = line[1:].partition("*")
-    if not _checksum_ok(body, csum):
-        return None
-    parts = body.split(",")
-    talker_sentence = parts[0]
-    sentence = talker_sentence[2:] if len(talker_sentence) >= 5 else talker_sentence
-
-    if sentence == "GGA" and len(parts) >= 10:
-        return _parse_gga(parts)
-    if sentence == "RMC" and len(parts) >= 10:
-        return _parse_rmc(parts)
-    return None
-
-
-def _parse_gga(p: list[str]) -> dict | None:
-    if not p[2] or not p[4]:
-        return {"sentence": "GGA", "fix_quality": _to_int(p[6]), "sats": _to_int(p[7])}
-    return {
-        "sentence": "GGA",
-        "utc": p[1],
-        "lat": _nmea_to_deg(p[2], p[3]),
-        "lon": _nmea_to_deg(p[4], p[5]),
-        "fix_quality": _to_int(p[6]),
-        "sats": _to_int(p[7]),
-        "hdop": _to_float(p[8]),
-        "alt_m": _to_float(p[9]),
-    }
-
-
-def _parse_rmc(p: list[str]) -> dict | None:
-    status = p[2]
-    if status != "A":
-        return {"sentence": "RMC", "active": False}
-    return {
-        "sentence": "RMC",
-        "active": True,
-        "utc": p[1],
-        "lat": _nmea_to_deg(p[3], p[4]),
-        "lon": _nmea_to_deg(p[5], p[6]),
-        "speed_kn": _to_float(p[7]),
-        "date": p[9],
-    }
-
-
-def _nmea_to_deg(value: str, hemi: str) -> float:
-    if not value:
-        return 0.0
-    try:
-        if "." not in value:
-            return 0.0
-        dot = value.index(".")
-        deg = int(value[: dot - 2])
-        minutes = float(value[dot - 2:])
-        v = deg + minutes / 60.0
-        if hemi in ("S", "W"):
-            v = -v
-        return v
-    except (ValueError, IndexError):
-        return 0.0
-
-
-def _to_int(s: str) -> int:
-    try:
-        return int(s)
-    except ValueError:
-        return 0
-
-
-def _to_float(s: str) -> float:
-    try:
-        return float(s)
-    except ValueError:
-        return 0.0
-
-
-def _checksum_ok(body: str, csum: str) -> bool:
-    try:
-        target = int(csum.strip()[:2], 16)
-    except ValueError:
-        return False
-    acc = 0
-    for ch in body:
-        acc ^= ord(ch)
-    return acc == target
-
-
-def _utc_to_iso(date_ddmmyy: str, utc_hhmmss: str) -> str:
-    if len(date_ddmmyy) != 6 or len(utc_hhmmss) < 6:
-        return ""
-    dd, mm, yy = date_ddmmyy[:2], date_ddmmyy[2:4], date_ddmmyy[4:6]
-    hh, mi, ss = utc_hhmmss[:2], utc_hhmmss[2:4], utc_hhmmss[4:6]
-    return f"20{yy}-{mm}-{dd} {hh}:{mi}:{ss}"
-
+# ── reader ─────────────────────────────────────────────────────────────────
 
 class GpsReader:
+    """Reads GPS fixes from gpsd via its JSON socket on localhost:2947.
+
+    The *devices* and *baud* arguments are accepted for API compatibility but
+    are ignored — gpsd owns device selection and baud negotiation.
+    """
+
+    GPSD_HOST = "127.0.0.1"
+    GPSD_PORT = 2947
+
+    # gpsd watch command — enable JSON, ask for device reports
+    _WATCH = b'?WATCH={"enable":true,"json":true}\n'
+
     def __init__(self, devices: Iterable[str], baud: int = 9600,
                  min_sats: int = 4) -> None:
+        # kept for API compatibility; not used
         self.devices = list(devices)
         self.baud = baud
         self.min_sats = min_sats
+
         self.state = GpsState()
         self._stop = threading.Event()
         self._thr: threading.Thread | None = None
+
+    # ── lifecycle ──────────────────────────────────────────────────────────
 
     def start(self) -> None:
         self._stop.clear()
@@ -177,155 +102,125 @@ class GpsReader:
     def stop(self) -> None:
         self._stop.set()
         if self._thr:
-            self._thr.join(timeout=2)
+            self._thr.join(timeout=3)
             self._thr = None
 
-    def _candidate_devices(self) -> list[str]:
-        """Config list first (so user preference wins), then anything else
-        matching /dev/ttyACM* or /dev/ttyUSB* — u-blox sometimes re-enumerates
-        to a higher index after a replug, so we must discover dynamically."""
-        import glob as _glob
-        seen = set()
-        out: list[str] = []
-        for d in list(self.devices) + sorted(
-                _glob.glob("/dev/ttyACM*") + _glob.glob("/dev/ttyUSB*")):
-            if d not in seen and os.path.exists(d):
-                seen.add(d)
-                out.append(d)
-        return out
-
-    def _open(self) -> tuple[int, str] | None:
-        """Try each candidate device; pick the first one emitting a valid
-        NMEA GGA or RMC sentence. The older "starts with $G" check passed on
-        u-blox's secondary control channel (which advertises $GNxxx stubs
-        without useful fix data), so we now validate through parse_nmea."""
-        for dev in self._candidate_devices():
-            try:
-                fd = os.open(dev, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
-            except OSError:
-                continue
-            if HAS_TERMIOS:
-                try:
-                    self._configure_serial(fd)
-                except Exception:
-                    pass
-            if self._validate_nmea(fd):
-                return fd, dev
-            os.close(fd)
-        return None
-
-    def _validate_nmea(self, fd: int, timeout_s: float = 3.5) -> bool:
-        """Accept the device only if it emits at least one parseable GGA/RMC
-        within the window — a valid checksum and one of the fix-bearing
-        sentences we actually care about."""
-        deadline = time.time() + timeout_s
-        buf = b""
-        while time.time() < deadline and not self._stop.is_set():
-            try:
-                chunk = os.read(fd, 256)
-            except BlockingIOError:
-                time.sleep(0.05)
-                continue
-            except OSError:
-                return False
-            if not chunk:
-                time.sleep(0.05)
-                continue
-            buf += chunk
-            while b"\n" in buf:
-                line, _, buf = buf.partition(b"\n")
-                text = line.decode("ascii", errors="ignore").strip("\r\x00 ")
-                parsed = parse_nmea(text)
-                if parsed and parsed.get("sentence") in ("GGA", "RMC"):
-                    return True
-            buf = buf[-256:]
-        return False
-
-    def _configure_serial(self, fd: int) -> None:
-        attrs = termios.tcgetattr(fd)
-        speed = getattr(termios, f"B{self.baud}", termios.B9600)
-        attrs[4] = speed
-        attrs[5] = speed
-        # 8N1 raw
-        attrs[2] = (attrs[2] & ~termios.CSIZE) | termios.CS8
-        attrs[2] &= ~termios.PARENB
-        attrs[2] &= ~termios.CSTOPB
-        attrs[2] |= termios.CREAD | termios.CLOCAL
-        attrs[3] &= ~(termios.ICANON | termios.ECHO | termios.ECHOE | termios.ISIG)
-        attrs[0] &= ~(termios.IXON | termios.IXOFF | termios.IXANY)
-        attrs[1] &= ~termios.OPOST
-        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    # ── background thread ─────────────────────────────────────────────────
 
     def _run(self) -> None:
-        buf = b""
-        fd: int | None = None
-        dev = ""
-        last_rmc_date = ""
         while not self._stop.is_set():
-            if fd is None:
-                opened = self._open()
-                if not opened:
-                    self._stop.wait(2.0)
-                    continue
-                fd, dev = opened
-                with self.state.lock:
-                    self.state.device = dev
-
+            sock = self._connect()
+            if sock is None:
+                # gpsd not ready yet — retry after a short pause
+                self._stop.wait(2.0)
+                continue
             try:
-                chunk = os.read(fd, 256)
-            except BlockingIOError:
-                self._stop.wait(0.1)
+                self._read_loop(sock)
+            except Exception:
+                pass
+            finally:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+            # brief pause before reconnecting
+            self._stop.wait(1.0)
+
+    def _connect(self) -> socket.socket | None:
+        try:
+            s = socket.create_connection(
+                (self.GPSD_HOST, self.GPSD_PORT), timeout=5
+            )
+            s.settimeout(2.0)
+            # consume the gpsd banner
+            s.recv(4096)
+            # enable JSON watch stream
+            s.sendall(self._WATCH)
+            return s
+        except OSError:
+            return None
+
+    def _read_loop(self, sock: socket.socket) -> None:
+        buf = ""
+        while not self._stop.is_set():
+            try:
+                chunk = sock.recv(4096).decode("utf-8", errors="ignore")
+            except socket.timeout:
                 continue
             except OSError:
-                os.close(fd)
-                fd = None
-                continue
-
+                break
             if not chunk:
-                self._stop.wait(0.1)
-                continue
-
+                break
             buf += chunk
-            while b"\n" in buf:
-                line, _, buf = buf.partition(b"\n")
+            while "\n" in buf:
+                line, _, buf = buf.partition("\n")
+                line = line.strip()
+                if not line:
+                    continue
                 try:
-                    text = line.decode("ascii", errors="ignore").strip("\r\x00 ")
-                except Exception:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
                     continue
-                parsed = parse_nmea(text)
-                if not parsed:
-                    continue
-                self._apply(parsed, last_rmc_date)
-                if parsed.get("sentence") == "RMC" and parsed.get("date"):
-                    last_rmc_date = parsed["date"]
+                self._apply(obj)
 
-        if fd is not None:
-            os.close(fd)
+    # ── state update ──────────────────────────────────────────────────────
 
-    def _apply(self, parsed: dict, last_rmc_date: str) -> None:
-        with self.state.lock:
-            sentence = parsed["sentence"]
-            now = time.time()
-            self.state.last_update = now
-            if sentence == "GGA":
-                fq = parsed.get("fix_quality", 0)
-                self.state.fix_quality = fq
-                self.state.sats = parsed.get("sats", self.state.sats)
-                if fq > 0 and "lat" in parsed:
-                    self.state.lat = parsed["lat"]
-                    self.state.lon = parsed["lon"]
-                    self.state.alt_m = parsed.get("alt_m", 0.0)
-                    hdop = parsed.get("hdop", 0.0)
-                    self.state.accuracy_m = max(2.5, hdop * 5.0) if hdop else 0.0
-                self.state.fix_3d = (fq > 0 and self.state.sats >= self.min_sats)
-            elif sentence == "RMC":
-                if parsed.get("active"):
-                    self.state.lat = parsed["lat"]
-                    self.state.lon = parsed["lon"]
-                    self.state.utc_iso = _utc_to_iso(parsed["date"], parsed["utc"])
-                    if not self.state.fix_3d and self.state.sats >= self.min_sats:
-                        self.state.fix_3d = True
+    def _apply(self, obj: dict) -> None:
+        cls = obj.get("class", "")
 
+        if cls == "DEVICES":
+            # pick up the first active device path for display
+            devices = obj.get("devices", [])
+            if devices:
+                path = devices[0].get("path", "")
+                if path:
+                    with self.state.lock:
+                        self.state.device = path
 
-# silence unused-import warning if struct gets pruned later
-_ = struct
+        elif cls == "DEVICE":
+            path = obj.get("path", "")
+            if path:
+                with self.state.lock:
+                    self.state.device = path
+
+        elif cls == "TPV":
+            # TPV = time-position-velocity report
+            mode = obj.get("mode", 0)
+            # mode 3 = 3D fix, mode 2 = 2D fix, mode 1 = no fix
+            lat = obj.get("lat")
+            lon = obj.get("lon")
+            alt = obj.get("alt", obj.get("altMSL", 0.0))
+            eph = obj.get("eph", 0.0)   # horizontal position error (metres)
+            time_str = obj.get("time", "")
+            path = obj.get("device", "")
+
+            with self.state.lock:
+                if path:
+                    self.state.device = path
+                self.state.last_update = time.time()
+
+                if mode >= 2 and lat is not None and lon is not None:
+                    self.state.lat = float(lat)
+                    self.state.lon = float(lon)
+                    self.state.alt_m = float(alt) if alt is not None else 0.0
+                    self.state.accuracy_m = float(eph) if eph else 0.0
+                    self.state.fix_quality = mode
+                    if time_str:
+                        self.state.utc_iso = time_str
+                    # require min_sats for a "good" 3D fix
+                    self.state.fix_3d = (
+                        mode == 3 and self.state.sats >= self.min_sats
+                    )
+                else:
+                    self.state.fix_quality = 0
+                    self.state.fix_3d = False
+
+        elif cls == "SKY":
+            # SKY = satellite constellation report
+            used = [s for s in obj.get("satellites", []) if s.get("used")]
+            n_used = len(used) if used else obj.get("uSat", 0)
+            with self.state.lock:
+                self.state.sats = int(n_used)
+                # re-evaluate fix_3d with updated sat count
+                if self.state.fix_quality == 3:
+                    self.state.fix_3d = self.state.sats >= self.min_sats
